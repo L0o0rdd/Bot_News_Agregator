@@ -79,6 +79,13 @@ async def init_db():
         """)
         await db.commit()
 
+        # Добавляем админа, если его нет
+        admin_id = 925886929  # ID админа
+        role = await get_user_role(admin_id)
+        if role != "admin":
+            await set_user_role(admin_id, "admin")
+            logger.info(f"Admin with ID {admin_id} added to database with role 'admin' 🌟")
+
 
 async def set_user_role(user_id: int, role: str):
     async with aiosqlite.connect(DATABASE) as db:
