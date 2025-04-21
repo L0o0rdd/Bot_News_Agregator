@@ -1,11 +1,21 @@
 import feedparser
+from cachetools import TTLCache
 from config.config import RSS_FEEDS
 
+# Кэш на 10 минут (600 секунд)
+cache = TTLCache(maxsize=100, ttl=600)
 
-def get_news(category: str, max_results: int = 5) -> list:
+
+def get_news(category: str, source: str = None, max_results: int = 5) -> list:
     feeds = RSS_FEEDS.get(category, [])
-    articles = []
+    if source:
+        feeds = [feed for feed in feeds if feed["name"] == source]
 
+    cache_key = f"{category}_{source or 'all'}"
+    if cache_key in cache:
+        return cache[cache_key]
+
+    articles = []
     for feed in feeds:
         try:
             parsed_feed = feedparser.parse(feed["url"])
@@ -24,4 +34,6 @@ def get_news(category: str, max_results: int = 5) -> list:
                 "source": feed["name"]
             })
 
-    return articles[:max_results]
+    articles = articles[:max_results]
+    cache[cache_key] = articles
+    return articles
