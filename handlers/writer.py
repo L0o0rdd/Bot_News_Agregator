@@ -1,11 +1,12 @@
 from aiogram import Router, F
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from keyboards.inline import get_writer_panel, get_categories_keyboard, get_confirmation_keyboard, \
-    get_writer_news_keyboard
+    get_writer_news_keyboard, get_purchase_keyboard, get_quantity_keyboard, get_menu_keyboard
 from utils.database import get_user_role, add_pending_news, get_writer_news, get_news_by_id, update_news, \
-    update_pending_news
+    update_pending_news, check_limit, increment_limit, add_limit, add_purchase, get_pending_news
+from utils.payment import create_payment, check_payment
 from utils.logger import logger
 
 router = Router()
@@ -43,9 +44,22 @@ async def writer_panel(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "create_news")
 async def create_news(callback: CallbackQuery, state: FSMContext):
-    if await get_user_role(callback.from_user.id) != "writer":
+    user_id = callback.from_user.id
+    if await get_user_role(user_id) != "writer":
         await callback.answer("🚫 Доступ запрещён!", show_alert=True)
         return
+
+    allowed, current_count, total_limit = await check_limit(user_id, "create_news")
+    if not allowed:
+        await callback.message.edit_text(
+            f"⚠️ У вас закончились лимиты на создание новостей ({current_count}/{total_limit})!\n"
+            "Хотите купить дополнительные лимиты? 💎",
+            reply_markup=get_purchase_keyboard("create_news")
+        )
+        await callback.answer()
+        logger.info(f"Writer {user_id} reached create limit: {current_count}/{total_limit}")
+        return
+
     await callback.message.edit_text(
         "📋 Выберите категорию для новости:",
         reply_markup=get_categories_keyboard()
@@ -123,9 +137,23 @@ async def process_image_url(message: Message, state: FSMContext):
 
 @router.callback_query(lambda c: c.data == "confirm_news")
 async def confirm_news(callback: CallbackQuery, state: FSMContext):
-    if await get_user_role(callback.from_user.id) != "writer":
+    user_id = callback.from_user.id
+    if await get_user_role(user_id) != "writer":
         await callback.answer("🚫 Доступ запрещён!", show_alert=True)
         return
+
+    allowed, current_count, total_limit = await check_limit(user_id, "create_news")
+    if not allowed:
+        await callback.message.edit_text(
+            f"⚠️ У вас закончились лимиты на создание новостей ({current_count}/{total_limit})!\n"
+            "Хотите купить дополнительные лимиты? 💎",
+            reply_markup=get_purchase_keyboard("create_news")
+        )
+        await callback.answer()
+        logger.info(f"Writer {user_id} reached create limit: {current_count}/{total_limit}")
+        return
+
+    await increment_limit(user_id, "create_news")
     data = await state.get_data()
     news = {
         "category": data["category"],
@@ -133,6 +161,7 @@ async def confirm_news(callback: CallbackQuery, state: FSMContext):
         "description": data["description"],
         "image_url": data["image_url"],
         "author_id": callback.from_user.id,
+        "source": "",
     }
     await add_pending_news(news)
     await callback.message.edit_text(
@@ -288,7 +317,7 @@ async def edit_image_url(message: Message, state: FSMContext):
         reply_markup=get_confirmation_keyboard("confirm_edit", "cancel_edit")
     )
     await state.set_state(NewsEditing.confirmation)
-    logger.info(f"Writer {message.from_user.id} completed editing news form.")
+    logger.info(f"Writer {message.from_user.id} completed news editing form.")
 
 
 @router.callback_query(lambda c: c.data == "confirm_edit")
@@ -296,6 +325,7 @@ async def confirm_edit(callback: CallbackQuery, state: FSMContext):
     if await get_user_role(callback.from_user.id) != "writer":
         await callback.answer("🚫 Доступ запрещён!", show_alert=True)
         return
+
     data = await state.get_data()
     news = {
         "category": data["category"],
@@ -303,17 +333,18 @@ async def confirm_edit(callback: CallbackQuery, state: FSMContext):
         "description": data["description"],
         "image_url": data["image_url"],
     }
-    if data["is_published"]:
+
+    if data.get("is_published"):
         news_id = data["news_id"]
         await update_news(news_id, news)
-        logger.info(f"Writer {callback.from_user.id} updated published news ID {news_id}")
+        logger.info(f"Writer {callback.from_user.id} updated published news ID {news_id}.")
     else:
         pending_id = data["pending_id"]
         await update_pending_news(pending_id, news)
-        logger.info(f"Writer {callback.from_user.id} updated pending news ID {pending_id}")
+        logger.info(f"Writer {callback.from_user.id} updated pending news ID {pending_id}.")
 
     await callback.message.edit_text(
-        "✅ Новость обновлена!",
+        "✅ Изменения сохранены!",
         reply_markup=get_writer_panel()
     )
     await state.clear()
@@ -329,4 +360,110 @@ async def cancel_edit(callback: CallbackQuery, state: FSMContext):
     )
     await state.clear()
     await callback.answer()
-    logger.info(f"Writer {callback.from_user.id} canceled news edit.")
+    logger.info(f"Writer {callback.from_user.id} canceled news editing.")
+
+
+# Обработчики покупки лимитов
+@router.callback_query(lambda c: c.data.startswith("buy_limits_"))
+async def buy_limits(callback: CallbackQuery):
+    action_type = callback.data.split("_")[2]
+    action_text = "просмотров" if action_type == "view_news" else "постов"
+    await callback.message.edit_text(
+        f"💎 Покупка дополнительных {action_text}\nВыберите количество:",
+        reply_markup=get_quantity_keyboard(action_type)
+    )
+    await callback.answer()
+    logger.info(f"Writer {callback.from_user.id} started buying limits for {action_type}.")
+
+
+@router.callback_query(lambda c: c.data.startswith("purchase_"))
+async def process_purchase(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    data = callback.data.split("_")
+    action_type = data[1]
+    quantity = int(data[2])
+    cost = int(data[3])
+    action_text = "просмотров" if action_type == "view_news" else "постов"
+
+    # Создаём платеж через ЮKassa
+    description = f"Покупка {quantity} {action_text} в боте"
+    payment = await create_payment(user_id, cost, description, action_type, quantity)
+    if not payment:
+        await callback.message.edit_text(
+            "❌ Ошибка при создании платежа. Попробуйте позже.",
+            reply_markup=get_menu_keyboard(await get_user_role(user_id))
+        )
+        await callback.answer()
+        logger.error(f"Failed to create payment for writer {user_id}")
+        return
+
+    payment_id = payment["id"]
+    confirmation_url = payment["confirmation"]["confirmation_url"]
+
+    # Сохраняем данные о платеже в состоянии
+    await state.update_data(payment_id=payment_id, action_type=action_type, quantity=quantity, cost=cost)
+
+    await callback.message.edit_text(
+        f"💳 Для оплаты {quantity} {action_text} на сумму {cost}₽ перейдите по ссылке:\n{confirmation_url}\n\n"
+        "После оплаты нажмите 'Проверить оплату' 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment_{payment_id}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+        ])
+    )
+    await callback.answer()
+    logger.info(f"Writer {user_id} created payment {payment_id} for {quantity} {action_type}.")
+
+
+@router.callback_query(lambda c: c.data.startswith("check_payment_"))
+async def check_payment_status(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    payment_id = callback.data.split("_")[2]
+    data = await state.get_data()
+    if data.get("payment_id") != payment_id:
+        await callback.message.edit_text(
+            "❌ Неверный ID платежа.",
+            reply_markup=get_menu_keyboard(await get_user_role(user_id))
+        )
+        await callback.answer()
+        return
+
+    payment = await check_payment(payment_id)
+    if not payment:
+        await callback.message.edit_text(
+            "❌ Ошибка при проверке платежа. Попробуйте позже.",
+            reply_markup=get_menu_keyboard(await get_user_role(user_id))
+        )
+        await callback.answer()
+        return
+
+    if payment["status"] == "succeeded":
+        action_type = data["action_type"]
+        quantity = data["quantity"]
+        cost = data["cost"]
+        action_text = "просмотров" if action_type == "view_news" else "постов"
+
+        # Добавляем лимиты и запись о покупке
+        await add_limit(user_id, action_type, quantity)
+        await add_purchase(user_id, action_type, quantity, cost)
+
+        await callback.message.edit_text(
+            f"🎉 Оплата прошла успешно!\n"
+            f"Вы приобрели {quantity} {action_text} за {cost}₽.\n"
+            "Теперь вы можете продолжить! 👇",
+            reply_markup=get_menu_keyboard(await get_user_role(user_id))
+        )
+        await state.clear()
+        await callback.answer()
+        logger.info(f"Writer {user_id} successfully purchased {quantity} {action_type} for {cost}₽.")
+    else:
+        await callback.message.edit_text(
+            f"⏳ Платёж ещё не завершён (статус: {payment['status']}).\n"
+            "Проверьте снова через несколько секунд.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_payment_{payment_id}")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+            ])
+        )
+        await callback.answer()
+        logger.info(f"Writer {user_id} checked payment {payment_id}, status: {payment['status']}.")

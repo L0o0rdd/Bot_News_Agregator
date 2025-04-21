@@ -5,35 +5,29 @@ from config.config import BOT_TOKEN, ADMIN_ID
 from handlers import user, admin, manager, writer
 from utils.database import init_db
 from utils.logger import logger
-from utils.rss_fether import fetch_news_task
-
+from utils.news import start_news_fetching  # Импортируем start_news_fetching
 
 async def main():
-    # Инициализация бота
     bot = Bot(token=BOT_TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
-    # Регистрация роутеров
     dp.include_router(user.router)
     dp.include_router(admin.router)
     dp.include_router(manager.router)
     dp.include_router(writer.router)
 
-    # Инициализация базы данных
     await init_db()
     logger.info("Database initialized successfully.")
 
-    # Запуск фоновой задачи для получения новостей
-    asyncio.create_task(fetch_news_task(bot))
-    logger.info("Started background task for fetching news.")
+    # Запуск фоновой задачи для получения новостей с переводом
+    asyncio.create_task(start_news_fetching(bot))
+    logger.info("Started background task for fetching news with translation.")
 
     try:
-        # Запуск polling
         logger.info("Starting bot polling...")
         await dp.start_polling(bot)
     finally:
-        # Закрытие сессии бота
         await bot.session.close()
         logger.info("Bot polling stopped and session closed.")
 
