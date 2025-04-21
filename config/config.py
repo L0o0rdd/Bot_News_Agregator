@@ -1,12 +1,8 @@
 BOT_TOKEN = "8101651301:AAEWGYqOAY6pPnYgXNS_OyRMQ1OrMg2Q4OE"
 ADMIN_ID = 925886929
 
-# Роли пользователей
-ROLES = {
-    "admin": [ADMIN_ID],
-    "manager": [],  # ID менеджеров будут добавляться админом
-    "user": []      # Обычные пользователи (по умолчанию все)
-}
+# Категории новостей
+CATEGORIES = ["general", "business", "technology", "entertainment", "sports"]
 
 # RSS-ленты по категориям
 RSS_FEEDS = {
