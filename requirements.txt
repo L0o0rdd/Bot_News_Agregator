@@ -3,3 +3,4 @@ requests==2.32.3
 feedparser==6.0.11
 aiosqlite==0.20.0
 cachetools==5.5.0
+deep-translator==1.11.4
