@@ -25,14 +25,15 @@ def get_admin_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def get_news_categories(refresh: bool = False) -> InlineKeyboardMarkup:
+def get_news_categories(refresh: bool = False, category: str = None) -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton(text="🌍 Общие", callback_data="news_general")],
         [InlineKeyboardButton(text="💼 Бизнес", callback_data="news_business")],
         [InlineKeyboardButton(text="🧑‍💻 Технологии", callback_data="news_technology")],
         [InlineKeyboardButton(text="🎮 Развлечения", callback_data="news_entertainment")],
+        [InlineKeyboardButton(text="⚽ Спорт", callback_data="news_sports")],
     ]
-    if refresh:
-        kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"news_{callback_data.split('_')[1]}")])
+    if refresh and category:
+        kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"news_{category}")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)

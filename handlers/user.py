@@ -29,13 +29,13 @@ async def show_news(callback: CallbackQuery):
     else:
         response = f"📰 Новости ({category.capitalize()}):\n\n"
         for i, article in enumerate(news, 1):
-            response += f"{i}. *{article['title']}*\n{article['description']}\n🔗 [Читать далее]({article['url']})\n\n"
+            response += f"{i}. *{article['title']}* ({article['source']})\n{article['description']}\n🔗 [Читать далее]({article['url']})\n\n"
 
         try:
             await callback.message.edit_text(
                 response,
                 parse_mode="Markdown",
-                reply_markup=get_news_categories(refresh=True)  # Добавляем кнопку "Обновить"
+                reply_markup=get_news_categories(refresh=True, category=category)
             )
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
