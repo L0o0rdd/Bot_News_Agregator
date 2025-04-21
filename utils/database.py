@@ -1,22 +1,38 @@
 import aiosqlite
-import asyncio
-from datetime import datetime, timedelta
-from utils.logger import logger
-from config.config import RSS_FEEDS, ADMIN_ID
+from datetime import datetime
+from utils.logger import logger  # Импортируем логгер
 
-DATABASE = "news_bot.db"
-
-
+# Инициализация базы данных
 async def init_db():
-    async with aiosqlite.connect(DATABASE) as db:
-        # Таблица пользователей
+    """
+    Создаёт таблицы в базе данных и обновляет схему, если необходимо.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        logger.info("Initializing database schema...")
+        # Создание таблицы users
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 role TEXT DEFAULT 'user'
             )
         """)
-        # Таблица новостей
+        # Проверка и добавление недостающих столбцов в таблице users
+        cursor = await db.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if "view_count" not in columns:
+            logger.info("Adding view_count column to users table")
+            await db.execute("ALTER TABLE users ADD COLUMN view_count INTEGER DEFAULT 0")
+        if "view_limit" not in columns:
+            logger.info("Adding view_limit column to users table")
+            await db.execute("ALTER TABLE users ADD COLUMN view_limit INTEGER DEFAULT 10")
+        if "create_count" not in columns:
+            logger.info("Adding create_count column to users table")
+            await db.execute("ALTER TABLE users ADD COLUMN create_count INTEGER DEFAULT 0")
+        if "create_limit" not in columns:
+            logger.info("Adding create_limit column to users table")
+            await db.execute("ALTER TABLE users ADD COLUMN create_limit INTEGER DEFAULT 5")
+
+        # Создание таблицы news
         await db.execute("""
             CREATE TABLE IF NOT EXISTS news (
                 news_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,54 +40,50 @@ async def init_db():
                 title TEXT,
                 description TEXT,
                 image_url TEXT,
-                author_id INTEGER,
                 source TEXT,
-                published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                published_at TEXT
             )
         """)
-        # Таблица ожидающих новостей
+        # Проверка и добавление недостающего столбца writer_id в таблице news
+        cursor = await db.execute("PRAGMA table_info(news)")
+        news_columns = [row[1] for row in await cursor.fetchall()]
+        if "writer_id" not in news_columns:
+            logger.info("Adding writer_id column to news table")
+            await db.execute("ALTER TABLE news ADD COLUMN writer_id INTEGER")
+        else:
+            logger.info("writer_id column already exists in news table")
+
+        # Таблица новостей на проверке
         await db.execute("""
             CREATE TABLE IF NOT EXISTS pending_news (
                 pending_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT,
+                writer_id INTEGER,
                 title TEXT,
                 description TEXT,
                 image_url TEXT,
-                author_id INTEGER,
-                source TEXT,
-                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Таблица источников
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS sources (
-                source_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT UNIQUE,
                 category TEXT,
-                is_active INTEGER DEFAULT 1
+                created_at TEXT
             )
         """)
         # Таблица рейтингов новостей
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS news_ratings (
+            CREATE TABLE IF NOT EXISTS ratings (
                 user_id INTEGER,
                 news_id INTEGER,
                 rating INTEGER,
                 PRIMARY KEY (user_id, news_id)
             )
         """)
-        # Таблица логов действий
+        # Таблица источников RSS
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS action_logs (
-                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                action_type TEXT,
-                target_id INTEGER,
-                details TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS sources (
+                source_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT,
+                url TEXT,
+                is_active INTEGER DEFAULT 1
             )
         """)
-        # Таблица подписок
+        # Таблица подписок пользователей на категории
         await db.execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER,
@@ -79,18 +91,7 @@ async def init_db():
                 PRIMARY KEY (user_id, category)
             )
         """)
-        # Таблица лимитов
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS limits (
-                user_id INTEGER,
-                action_type TEXT,  -- 'view_news' или 'create_news'
-                count INTEGER DEFAULT 0,
-                last_reset TIMESTAMP,
-                total_limit INTEGER,
-                PRIMARY KEY (user_id, action_type)
-            )
-        """)
-        # Таблица покупок
+        # Таблица покупок лимитов
         await db.execute("""
             CREATE TABLE IF NOT EXISTS purchases (
                 purchase_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,357 +99,423 @@ async def init_db():
                 action_type TEXT,
                 amount INTEGER,
                 cost INTEGER,
-                purchase_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                purchase_date TEXT
             )
         """)
         await db.commit()
+        logger.info("Database schema initialization completed")
 
-        # Добавляем админа
-        role = await get_user_role(ADMIN_ID)
-        if role != "admin":
-            await set_user_role(ADMIN_ID, "admin")
-            logger.info(f"Admin with ID {ADMIN_ID} added to database with role 'admin' 🌟")
-
-        # Добавляем RSS-ленты
-        for category, feeds in RSS_FEEDS.items():
-            for feed in feeds:
-                url = feed["url"]
-                await add_source(url, category)
-                logger.info(f"Added RSS feed {url} for category {category} 🌐")
-
-
+# Управление ролями пользователей
 async def get_user_role(user_id: int) -> str:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else "user"
-
+    """
+    Получает роль пользователя по его ID. Если пользователь не существует, создаёт его с ролью 'user'.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        if row:
+            return row[0]
+        await db.execute("INSERT INTO users (user_id, role) VALUES (?, ?)", (user_id, "user"))
+        await db.commit()
+        return "user"
 
 async def set_user_role(user_id: int, role: str):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)", (user_id, role))
+    """
+    Устанавливает роль для пользователя.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        await db.execute("UPDATE users SET role = ? WHERE user_id = ?", (role, user_id))
         await db.commit()
 
+async def remove_user_role(user_id: int, role: str) -> bool:
+    """
+    Удаляет указанную роль у пользователя, возвращая его к роли 'user'. Возвращает True, если роль была удалена.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        if row and row[0] == role:
+            await db.execute("UPDATE users SET role = 'user' WHERE user_id = ?", (user_id,))
+            await db.commit()
+            return True
+        return False
 
-async def add_source(url: str, category: str):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("INSERT OR IGNORE INTO sources (url, category) VALUES (?, ?)", (url, category))
-        await db.commit()
+async def get_users_by_role(role: str) -> list:
+    """
+    Возвращает список ID пользователей с указанной ролью.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute("SELECT user_id FROM users WHERE role = ?", (role,))
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
 
-
-async def get_sources(category: str = None) -> list:
-    async with aiosqlite.connect(DATABASE) as db:
-        query = "SELECT * FROM sources"
-        params = []
-        if category:
-            query += " WHERE category = ?"
-            params.append(category)
-        async with db.execute(query, params) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in await cursor.fetchall()]
-
-
-# Функции для работы с лимитами
-async def reset_limits_if_needed(user_id: int, action_type: str):
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT last_reset, total_limit FROM limits WHERE user_id = ? AND action_type = ?",
-                (user_id, action_type)
-        ) as cursor:
-            row = await cursor.fetchone()
-            default_limit = 10 if action_type == "view_news" else 2  # 10 для просмотров, 2 для постов
-            now = datetime.utcnow()
-            if not row:
-                await db.execute(
-                    "INSERT INTO limits (user_id, action_type, count, last_reset, total_limit) VALUES (?, ?, ?, ?, ?)",
-                    (user_id, action_type, 0, now, default_limit)
-                )
-                await db.commit()
-                return default_limit
-            last_reset, total_limit = row[0], row[1]
-            last_reset = datetime.fromisoformat(last_reset) if last_reset else now
-            if (now - last_reset).days >= 1:
-                await db.execute(
-                    "UPDATE limits SET count = 0, last_reset = ? WHERE user_id = ? AND action_type = ?",
-                    (now, user_id, action_type)
-                )
-                await db.commit()
-            return total_limit
-
-
+# Управление лимитами
 async def check_limit(user_id: int, action_type: str) -> tuple[bool, int, int]:
-    total_limit = await reset_limits_if_needed(user_id, action_type)
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT count FROM limits WHERE user_id = ? AND action_type = ?",
-                (user_id, action_type)
-        ) as cursor:
-            row = await cursor.fetchone()
-            current_count = row[0] if row else 0
-            return current_count < total_limit, current_count, total_limit
-
+    """
+    Проверяет, не превышен ли лимит действия (view_news или create_news) для пользователя.
+    Возвращает: (разрешено ли действие, текущий счётчик, общий лимит).
+    """
+    count_column = "view_count" if action_type == "view_news" else "create_count"
+    limit_column = "view_limit" if action_type == "view_news" else "create_limit"
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            f"SELECT {count_column}, {limit_column} FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            await db.execute(
+                "INSERT INTO users (user_id, role) VALUES (?, ?)",
+                (user_id, "user")
+            )
+            await db.commit()
+            return True, 0, 10 if action_type == "view_news" else 5
+        current_count, total_limit = row
+        return current_count < total_limit, current_count, total_limit
 
 async def increment_limit(user_id: int, action_type: str):
-    async with aiosqlite.connect(DATABASE) as db:
+    """
+    Увеличивает счётчик использованных действий (view_news или create_news) для пользователя.
+    """
+    count_column = "view_count" if action_type == "view_news" else "create_count"
+    async with aiosqlite.connect("news_bot.db") as db:
         await db.execute(
-            "UPDATE limits SET count = count + 1 WHERE user_id = ? AND action_type = ?",
-            (user_id, action_type)
+            f"UPDATE users SET {count_column} = {count_column} + 1 WHERE user_id = ?",
+            (user_id,)
         )
         await db.commit()
 
-
-async def add_limit(user_id: int, action_type: str, amount: int):
-    async with aiosqlite.connect(DATABASE) as db:
+async def add_limit(user_id: int, action_type: str, quantity: int):
+    """
+    Добавляет дополнительные лимиты для указанного действия (view_news или create_news).
+    """
+    limit_column = "view_limit" if action_type == "view_news" else "create_limit"
+    async with aiosqlite.connect("news_bot.db") as db:
         await db.execute(
-            "UPDATE limits SET total_limit = total_limit + ? WHERE user_id = ? AND action_type = ?",
-            (amount, user_id, action_type)
+            f"UPDATE users SET {limit_column} = {limit_column} + ? WHERE user_id = ?",
+            (quantity, user_id)
         )
         await db.commit()
 
-
+# Управление покупками
 async def add_purchase(user_id: int, action_type: str, amount: int, cost: int):
-    async with aiosqlite.connect(DATABASE) as db:
+    """
+    Сохраняет информацию о покупке лимитов пользователем.
+    """
+    purchase_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect("news_bot.db") as db:
         await db.execute(
-            "INSERT INTO purchases (user_id, action_type, amount, cost) VALUES (?, ?, ?, ?)",
-            (user_id, action_type, amount, cost)
+            "INSERT INTO purchases (user_id, action_type, amount, cost, purchase_date) VALUES (?, ?, ?, ?, ?)",
+            (user_id, action_type, amount, cost, purchase_date)
         )
         await db.commit()
 
-
+# Статистика пользователя
 async def get_user_stats(user_id: int) -> dict:
-    async with aiosqlite.connect(DATABASE) as db:
-        stats = {"role": await get_user_role(user_id)}
-
-        # Статистика просмотров и постов
-        view_allowed, view_count, view_limit = await check_limit(user_id, "view_news")
-        stats["view_count"] = view_count
-        stats["view_limit"] = view_limit
-
-        if stats["role"] == "writer":
-            create_allowed, create_count, create_limit = await check_limit(user_id, "create_news")
-            stats["create_count"] = create_count
-            stats["create_limit"] = create_limit
-
-        # История покупок
-        async with db.execute(
-                "SELECT action_type, amount, cost, purchase_date FROM purchases WHERE user_id = ? ORDER BY purchase_date DESC LIMIT 5",
-                (user_id,)
-        ) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            stats["purchases"] = [dict(zip(columns, row)) for row in await cursor.fetchall()]
-
-        # Остальная статистика
-        async with db.execute(
-                "SELECT COUNT(*) FROM news_ratings WHERE user_id = ? AND rating = 1",
-                (user_id,)
-        ) as cursor:
-            stats["likes"] = (await cursor.fetchone())[0]
-        async with db.execute(
-                "SELECT COUNT(*) FROM news_ratings WHERE user_id = ? AND rating = -1",
-                (user_id,)
-        ) as cursor:
-            stats["dislikes"] = (await cursor.fetchone())[0]
-
-        if stats["role"] == "writer":
-            async with db.execute(
-                    "SELECT COUNT(*) FROM news WHERE author_id = ?",
-                    (user_id,)
-            ) as cursor:
-                stats["published_news"] = (await cursor.fetchone())[0]
-            async with db.execute(
-                    "SELECT COUNT(*) FROM pending_news WHERE author_id = ?",
-                    (user_id,)
-            ) as cursor:
-                stats["pending_news"] = (await cursor.fetchone())[0]
-            async with db.execute(
-                    "SELECT AVG(rating) FROM news_ratings WHERE news_id IN (SELECT news_id FROM news WHERE author_id = ?)",
-                    (user_id,)
-            ) as cursor:
-                avg_rating = (await cursor.fetchone())[0]
-                stats["average_rating"] = avg_rating if avg_rating else 0
-
-        return stats
-
-
-# Остальные функции (без изменений)
-async def add_pending_news(news: dict):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute(
-            """
-            INSERT INTO pending_news (category, title, description, image_url, author_id, source)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                news["category"],
-                news["title"],
-                news["description"],
-                news["image_url"],
-                news["author_id"],
-                news["source"],
-            ),
+    """
+    Получает статистику пользователя: роль, лимиты, лайки, дизлайки, покупки, новости (для писателей).
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT role, view_count, view_limit, create_count, create_limit FROM users WHERE user_id = ?",
+            (user_id,)
         )
-        await db.commit()
+        user_data = await cursor.fetchone()
+        if not user_data:
+            await db.execute(
+                "INSERT INTO users (user_id, role) VALUES (?, ?)",
+                (user_id, "user")
+            )
+            await db.commit()
+            user_data = ("user", 0, 10, 0, 5)
 
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ratings WHERE user_id = ? AND rating = 1",
+            (user_id,)
+        )
+        likes = (await cursor.fetchone())[0]
 
-async def get_pending_news() -> list:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute("SELECT * FROM pending_news") as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in await cursor.fetchall()]
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ratings WHERE user_id = ? AND rating = -1",
+            (user_id,)
+        )
+        dislikes = (await cursor.fetchone())[0]
 
+        cursor = await db.execute(
+            "SELECT action_type, amount, cost, purchase_date FROM purchases WHERE user_id = ? ORDER BY purchase_date DESC LIMIT 5",
+            (user_id,)
+        )
+        purchases = [
+            {"action_type": row[0], "amount": row[1], "cost": row[2], "purchase_date": row[3]}
+            for row in await cursor.fetchall()
+        ]
 
+        published_news = 0
+        pending_news = 0
+        average_rating = 0.0
+        if user_data[0] == "writer":
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM news WHERE writer_id = ?",
+                (user_id,)
+            )
+            published_news = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM pending_news WHERE writer_id = ?",
+                (user_id,)
+            )
+            pending_news = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT AVG(rating) FROM ratings WHERE news_id IN (SELECT news_id FROM news WHERE writer_id = ?)",
+                (user_id,)
+            )
+            avg_rating = await cursor.fetchone()
+            average_rating = avg_rating[0] if avg_rating[0] is not None else 0.0
+
+        return {
+            "role": user_data[0],
+            "view_count": user_data[1],
+            "view_limit": user_data[2],
+            "create_count": user_data[3],
+            "create_limit": user_data[4],
+            "likes": likes,
+            "dislikes": dislikes,
+            "purchases": purchases,
+            "published_news": published_news,
+            "pending_news": pending_news,
+            "average_rating": average_rating,
+        }
+
+# Управление новостями
 async def get_news(category: str = None, limit: int = 10) -> list:
-    async with aiosqlite.connect(DATABASE) as db:
+    """
+    Получает список опубликованных новостей, отфильтрованных по категории (если указана).
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
         query = "SELECT * FROM news"
         params = []
         if category:
             query += " WHERE category = ?"
             params.append(category)
-        query += " ORDER BY published_at DESC LIMIT ?"
+        query += " LIMIT ?"
         params.append(limit)
-        async with db.execute(query, params) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in await cursor.fetchall()]
 
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [
+            {
+                "news_id": row[0],
+                "category": row[1],
+                "title": row[2],
+                "description": row[3],
+                "image_url": row[4],
+                "source": row[5],
+                "published_at": row[6],
+                "writer_id": row[7] if len(row) > 7 else None,
+            }
+            for row in rows
+        ]
 
 async def get_news_by_id(news_id: int) -> dict:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute("SELECT * FROM news WHERE news_id = ?", (news_id,)) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            row = await cursor.fetchone()
-            return dict(zip(columns, row)) if row else None
+    """
+    Получает информацию о конкретной новости по её ID.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute("SELECT * FROM news WHERE news_id = ?", (news_id,))
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "news_id": row[0],
+                "category": row[1],
+                "title": row[2],
+                "description": row[3],
+                "image_url": row[4],
+                "source": row[5],
+                "published_at": row[6],
+                "writer_id": row[7] if len(row) > 7 else None,
+            }
+        return None
 
+async def insert_pending_news(writer_id: int, title: str, description: str, image_url: str, category: str) -> int:
+    """
+    Добавляет новость в очередь на проверку. Возвращает ID добавленной записи.
+    """
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "INSERT INTO pending_news (writer_id, title, description, image_url, category, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (writer_id, title, description, image_url, category, created_at)
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+async def update_pending_news(news_id: int, title: str, description: str, image_url: str, category: str, is_published: bool = False):
+    """
+    Обновляет данные новости (опубликованной или на проверке).
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        if is_published:
+            await db.execute(
+                "UPDATE news SET title = ?, description = ?, image_url = ?, category = ? WHERE news_id = ?",
+                (title, description, image_url, category, news_id)
+            )
+        else:
+            await db.execute(
+                "UPDATE pending_news SET title = ?, description = ?, image_url = ?, category = ? WHERE pending_id = ?",
+                (title, description, image_url, category, news_id)
+            )
+        await db.commit()
+
+async def delete_pending_news(news_id: int, is_published: bool = False):
+    """
+    Удаляет новость (опубликованную или на проверке).
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        if is_published:
+            await db.execute("DELETE FROM news WHERE news_id = ?", (news_id,))
+        else:
+            await db.execute("DELETE FROM pending_news WHERE pending_id = ?", (news_id,))
+        await db.commit()
+
+async def get_pending_news() -> list:
+    """
+    Получает список новостей, ожидающих проверки.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT pending_id, writer_id, title, description, image_url, category, created_at FROM pending_news"
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "pending_id": row[0],
+                "writer_id": row[1],
+                "title": row[2],
+                "description": row[3],
+                "image_url": row[4],
+                "category": row[5],
+                "created_at": row[6],
+            }
+            for row in rows
+        ]
 
 async def approve_news(pending_id: int) -> int:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute("SELECT * FROM pending_news WHERE pending_id = ?", (pending_id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return None
-            columns = [desc[0] for desc in cursor.description]
-            news = dict(zip(columns, row))
-
-        await db.execute(
-            """
-            INSERT INTO news (category, title, description, image_url, author_id, source)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                news["category"],
-                news["title"],
-                news["description"],
-                news["image_url"],
-                news["author_id"],
-                news["source"],
-            ),
+    """
+    Одобряет новость, перемещая её из pending_news в news. Возвращает ID опубликованной новости.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT writer_id, title, description, image_url, category, created_at FROM pending_news WHERE pending_id = ?",
+            (pending_id,)
         )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+
+        writer_id, title, description, image_url, category, created_at = row
+        published_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor = await db.execute(
+            "INSERT INTO news (category, title, description, image_url, source, published_at, writer_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (category, title, description, image_url, "Writer", published_at, writer_id)
+        )
+        news_id = cursor.lastrowid
         await db.execute("DELETE FROM pending_news WHERE pending_id = ?", (pending_id,))
         await db.commit()
-        return news["author_id"]
+        return news_id
 
-
-async def reject_news(pending_id: int) -> int:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute("SELECT author_id FROM pending_news WHERE pending_id = ?", (pending_id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return None
-            author_id = row[0]
+async def reject_news(pending_id: int):
+    """
+    Отклоняет новость, удаляя её из pending_news.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
         await db.execute("DELETE FROM pending_news WHERE pending_id = ?", (pending_id,))
         await db.commit()
-        return author_id
 
-
+# Управление рейтингами
 async def set_news_rating(user_id: int, news_id: int, rating: int):
-    async with aiosqlite.connect(DATABASE) as db:
+    """
+    Устанавливает рейтинг (лайк или дизлайк) для новости от пользователя.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
         await db.execute(
-            "INSERT OR REPLACE INTO news_ratings (user_id, news_id, rating) VALUES (?, ?, ?)",
-            (user_id, news_id, rating),
+            "INSERT OR REPLACE INTO ratings (user_id, news_id, rating) VALUES (?, ?, ?)",
+            (user_id, news_id, rating)
         )
         await db.commit()
-
 
 async def get_news_rating(news_id: int) -> tuple[int, int]:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT COUNT(*) FROM news_ratings WHERE news_id = ? AND rating = 1",
-                (news_id,)
-        ) as cursor:
-            likes = (await cursor.fetchone())[0]
-        async with db.execute(
-                "SELECT COUNT(*) FROM news_ratings WHERE news_id = ? AND rating = -1",
-                (news_id,)
-        ) as cursor:
-            dislikes = (await cursor.fetchone())[0]
+    """
+    Получает количество лайков и дизлайков для новости.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ratings WHERE news_id = ? AND rating = 1",
+            (news_id,)
+        )
+        likes = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM ratings WHERE news_id = ? AND rating = -1",
+            (news_id,)
+        )
+        dislikes = (await cursor.fetchone())[0]
+
         return likes, dislikes
 
-
 async def get_user_rating(user_id: int, news_id: int) -> int:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT rating FROM news_ratings WHERE user_id = ? AND news_id = ?",
-                (user_id, news_id)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
-
-
-async def toggle_source(source_id: int) -> bool:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT is_active FROM sources WHERE source_id = ?", (source_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            if not row:
-                return False
-            is_active = row[0]
-        new_status = 0 if is_active else 1
-        await db.execute(
-            "UPDATE sources SET is_active = ? WHERE source_id = ?",
-            (new_status, source_id)
+    """
+    Получает рейтинг, установленный пользователем для конкретной новости.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT rating FROM ratings WHERE user_id = ? AND news_id = ?",
+            (user_id, news_id)
         )
-        await db.commit()
-        return True
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
+# Управление источниками
+async def get_sources(category: str = None) -> list:
+    """
+    Получает список источников RSS, отфильтрованных по категории (если указана).
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        query = "SELECT * FROM sources"
+        params = []
+        if category:
+            query += " WHERE category = ?"
+            params.append(category)
 
-async def remove_user_role(user_id: int):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute(
-            "UPDATE users SET role = 'user' WHERE user_id = ?",
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [
+            {
+                "source_id": row[0],
+                "category": row[1],
+                "url": row[2],
+                "is_active": row[3],
+            }
+            for row in rows
+        ]
+
+# Управление подписками
+async def get_user_subscriptions(user_id: int) -> list:
+    """
+    Получает список категорий, на которые подписан пользователь.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT category FROM subscriptions WHERE user_id = ?",
             (user_id,)
         )
-        await db.commit()
-
-
-async def get_users_by_role(role: str) -> list:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT user_id FROM users WHERE role = ?",
-                (role,)
-        ) as cursor:
-            return [row[0] for row in await cursor.fetchall()]
-
-
-async def get_subscribers(category: str) -> list:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT user_id FROM subscriptions WHERE category = ?",
-                (category,)
-        ) as cursor:
-            return [row[0] for row in await cursor.fetchall()]
-
-
-async def get_user_subscriptions(user_id: int) -> list:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT category FROM subscriptions WHERE user_id = ?",
-                (user_id,)
-        ) as cursor:
-            return [row[0] for row in await cursor.fetchall()]
-
+        return [row[0] for row in await cursor.fetchall()]
 
 async def subscribe_to_category(user_id: int, category: str) -> bool:
-    async with aiosqlite.connect(DATABASE) as db:
+    """
+    Подписывает пользователя на категорию. Возвращает False, если подписка уже существует.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
         try:
             await db.execute(
                 "INSERT INTO subscriptions (user_id, category) VALUES (?, ?)",
@@ -459,9 +526,11 @@ async def subscribe_to_category(user_id: int, category: str) -> bool:
         except aiosqlite.IntegrityError:
             return False
 
-
 async def unsubscribe_from_category(user_id: int, category: str) -> bool:
-    async with aiosqlite.connect(DATABASE) as db:
+    """
+    Отписывает пользователя от категории.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
         await db.execute(
             "DELETE FROM subscriptions WHERE user_id = ? AND category = ?",
             (user_id, category)
@@ -469,88 +538,52 @@ async def unsubscribe_from_category(user_id: int, category: str) -> bool:
         await db.commit()
         return True
 
-
-async def update_news(news_id: int, news: dict):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute(
-            """
-            UPDATE news
-            SET category = ?, title = ?, description = ?, image_url = ?
-            WHERE news_id = ?
-            """,
-            (news["category"], news["title"], news["description"], news["image_url"], news_id),
+async def get_subscribers(category: str) -> list:
+    """
+    Получает список ID пользователей, подписанных на указанную категорию.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM subscriptions WHERE category = ?",
+            (category,)
         )
-        await db.commit()
+        return [row[0] for row in await cursor.fetchall()]
 
-
-async def update_pending_news(pending_id: int, news: dict):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute(
-            """
-            UPDATE pending_news
-            SET category = ?, title = ?, description = ?, image_url = ?
-            WHERE pending_id = ?
-            """,
-            (news["category"], news["title"], news["description"], news["image_url"], pending_id),
+# Управление новостями писателя
+async def get_writer_news(writer_id: int) -> tuple[list, list]:
+    """
+    Получает списки опубликованных и ожидающих проверки новостей для писателя.
+    """
+    async with aiosqlite.connect("news_bot.db") as db:
+        cursor = await db.execute(
+            "SELECT news_id, category, title, description, image_url, writer_id FROM news WHERE writer_id = ?",
+            (writer_id,)
         )
-        await db.commit()
+        published = [
+            {
+                "news_id": row[0],
+                "category": row[1],
+                "title": row[2],
+                "description": row[3],
+                "image_url": row[4],
+                "writer_id": row[5] if len(row) > 5 else None,
+            }
+            for row in await cursor.fetchall()
+        ]
 
+        cursor = await db.execute(
+            "SELECT pending_id, category, title, description, image_url FROM pending_news WHERE writer_id = ?",
+            (writer_id,)
+        )
+        pending = [
+            {
+                "pending_id": row[0],
+                "category": row[1],
+                "title": row[2],
+                "description": row[3],
+                "image_url": row[4],
+            }
+            for row in await cursor.fetchall()
+        ]
 
-async def get_writer_news(user_id: int) -> tuple[list, list]:
-    async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-                "SELECT * FROM news WHERE author_id = ?",
-                (user_id,)
-        ) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            published = [dict(zip(columns, row)) for row in await cursor.fetchall()]
-        async with db.execute(
-                "SELECT * FROM pending_news WHERE author_id = ?",
-                (user_id,)
-        ) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            pending = [dict(zip(columns, row)) for row in await cursor.fetchall()]
         return published, pending
-
-
-async def clear_old_news(days: int):
-    async with aiosqlite.connect(DATABASE) as db:
-        threshold = (datetime.utcnow() - timedelta(days=days)).isoformat()
-        await db.execute("DELETE FROM news WHERE published_at < ?", (threshold,))
-        await db.execute("DELETE FROM pending_news WHERE submitted_at < ?", (threshold,))
-        await db.commit()
-
-
-async def get_admin_stats() -> dict:
-    async with aiosqlite.connect(DATABASE) as db:
-        stats = {}
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
-            stats["total_users"] = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE role = 'manager'") as cursor:
-            stats["managers"] = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE role = 'writer'") as cursor:
-            stats["writers"] = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM news_ratings WHERE rating = 1") as cursor:
-            stats["total_likes"] = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM news_ratings WHERE rating = -1") as cursor:
-            stats["total_dislikes"] = (await cursor.fetchone())[0]
-
-        stats["news_by_category"] = {}
-        async with db.execute("SELECT category, COUNT(*) FROM news GROUP BY category") as cursor:
-            for row in await cursor.fetchall():
-                stats["news_by_category"][row[0]] = row[1]
-
-        stats["top_news"] = []
-        async with db.execute(
-                """
-                SELECT news_id, title, (SELECT COUNT(*) FROM news_ratings WHERE news_id = news.news_id AND rating = 1) -
-                (SELECT COUNT(*) FROM news_ratings WHERE news_id = news.news_id AND rating = -1) as rating
-                FROM news
-                ORDER BY rating DESC
-                LIMIT 5
-                """
-        ) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            stats["top_news"] = [dict(zip(columns, row)) for row in await cursor.fetchall()]
-
-        return stats

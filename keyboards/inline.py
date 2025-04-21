@@ -117,6 +117,10 @@ def get_writer_news_keyboard(published: list, pending: list) -> InlineKeyboardMa
                 InlineKeyboardButton(
                     text=f"ID {news['news_id']}: {news['title']}",
                     callback_data=f"edit_published_{news['news_id']}"
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"delete_published_{news['news_id']}"
                 )
             ])
     if pending:
@@ -126,6 +130,10 @@ def get_writer_news_keyboard(published: list, pending: list) -> InlineKeyboardMa
                 InlineKeyboardButton(
                     text=f"ID {news['pending_id']}: {news['title']}",
                     callback_data=f"edit_pending_{news['pending_id']}"
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"delete_pending_{news['pending_id']}"
                 )
             ])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="writer_panel")])
@@ -162,9 +170,9 @@ def get_quantity_keyboard(action_type: str) -> InlineKeyboardMarkup:
 
 def get_profile_keyboard(role: str) -> InlineKeyboardMarkup:
     kb = [
-        [InlineKeyboardButton(text="💎 Купить просмотры", callback_data="buy_limits_view_news")]
+        [InlineKeyboardButton(text="💎 Купить просмотры: 5 за 10₽, 10 за 15₽, 20 за 25₽", callback_data="buy_limits_view_news")]
     ]
     if role == "writer":
-        kb.append([InlineKeyboardButton(text="💎 Купить посты", callback_data="buy_limits_create_news")])
+        kb.append([InlineKeyboardButton(text="💎 Купить посты: 5 за 10₽, 10 за 15₽, 20 за 25₽", callback_data="buy_limits_create_news")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)

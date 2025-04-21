@@ -1,12 +1,14 @@
 import feedparser
 import asyncio
 from aiogram import Bot
-from utils.database import get_sources, add_pending_news, get_pending_news
+from utils.database import get_sources, insert_pending_news, get_pending_news, approve_news
 from utils.logger import logger
 from deep_translator import GoogleTranslator
-from utils.database import approve_news  # Импортируем approve_news
 
 async def translate_to_russian(text: str) -> str:
+    """
+    Переводит текст на русский язык с помощью GoogleTranslator.
+    """
     try:
         translator = GoogleTranslator(source="auto", target="ru")
         translated = translator.translate(text)
@@ -16,13 +18,16 @@ async def translate_to_russian(text: str) -> str:
         return text
 
 async def fetch_news(bot: Bot):
+    """
+    Получает новости из активных RSS-источников, переводит их и добавляет в очередь на проверку.
+    """
     sources = await get_sources()
     for source in sources:
         if not source["is_active"]:
             continue
         try:
             feed = feedparser.parse(source["url"])
-            for entry in feed.entries[:5]:
+            for entry in feed.entries[:5]:  # Ограничиваем до 5 новостей на источник
                 news = {
                     "category": source["category"],
                     "title": entry.get("title", "Без заголовка"),
@@ -43,7 +48,14 @@ async def fetch_news(bot: Bot):
                         if media.get("medium", "") == "image":
                             news["image_url"] = media.get("url", "")
                             break
-                await add_pending_news(news)
+                # Используем insert_pending_news вместо add_pending_news
+                await insert_pending_news(
+                    writer_id=0,  # RSS-новости не имеют автора
+                    title=news["title"],
+                    description=news["description"],
+                    image_url=news["image_url"],
+                    category=news["category"]
+                )
                 # Автоматически одобряем новость
                 pending_news = await get_pending_news()
                 if pending_news:
@@ -55,7 +67,10 @@ async def fetch_news(bot: Bot):
             logger.error(f"Error fetching news from {source['url']}: {str(e)}")
 
 async def start_news_fetching(bot: Bot):
+    """
+    Запускает бесконечный цикл для периодического получения новостей из RSS-лент.
+    """
     while True:
         logger.info("Fetching news from RSS sources...")
         await fetch_news(bot)
-        await asyncio.sleep(3600)
+        await asyncio.sleep(3600)  # Проверяем каждый час

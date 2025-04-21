@@ -52,16 +52,18 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(lambda c: c.data == "view_news")
 async def view_news(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    allowed, current_count, total_limit = await check_limit(user_id, "view_news")
-    if not allowed:
-        await callback.message.edit_text(
-            f"⚠️ У вас закончились лимиты на просмотр новостей ({current_count}/{total_limit})!\n"
-            "Хотите купить дополнительные просмотры? 💎",
-            reply_markup=get_purchase_keyboard("view_news")
-        )
-        await callback.answer()
-        logger.info(f"User {user_id} reached view limit: {current_count}/{total_limit}")
-        return
+    role = await get_user_role(user_id)
+    if role != "admin":  # Пропускаем проверку лимитов для админов
+        allowed, current_count, total_limit = await check_limit(user_id, "view_news")
+        if not allowed:
+            await callback.message.edit_text(
+                f"⚠️ У вас закончились лимиты на просмотр новостей ({current_count}/{total_limit})!\n"
+                "Хотите купить дополнительные просмотры? 💎",
+                reply_markup=get_purchase_keyboard("view_news")
+            )
+            await callback.answer()
+            logger.info(f"User {user_id} reached view limit: {current_count}/{total_limit}")
+            return
 
     await callback.message.edit_text(
         "📋 Выбери категорию новостей:",
@@ -74,18 +76,20 @@ async def view_news(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(lambda c: c.data.startswith("category_"), NewsViewing.viewing)
 async def select_category(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    allowed, current_count, total_limit = await check_limit(user_id, "view_news")
-    if not allowed:
-        await callback.message.edit_text(
-            f"⚠️ У вас закончились лимиты на просмотр новостей ({current_count}/{total_limit})!\n"
-            "Хотите купить дополнительные просмотры? 💎",
-            reply_markup=get_purchase_keyboard("view_news")
-        )
-        await callback.answer()
-        logger.info(f"User {user_id} reached view limit: {current_count}/{total_limit}")
-        return
+    role = await get_user_role(user_id)
+    if role != "admin":  # Пропускаем проверку лимитов для админов
+        allowed, current_count, total_limit = await check_limit(user_id, "view_news")
+        if not allowed:
+            await callback.message.edit_text(
+                f"⚠️ У вас закончились лимиты на просмотр новостей ({current_count}/{total_limit})!\n"
+                "Хотите купить дополнительные просмотры? 💎",
+                reply_markup=get_purchase_keyboard("view_news")
+            )
+            await callback.answer()
+            logger.info(f"User {user_id} reached view limit: {current_count}/{total_limit}")
+            return
+        await increment_limit(user_id, "view_news")
 
-    await increment_limit(user_id, "view_news")
     category = callback.data.split("_")[1]
     news = await get_news(category=category, limit=10)
     if not news:
@@ -126,18 +130,20 @@ async def select_category(callback: CallbackQuery, state: FSMContext):
                        NewsViewing.viewing)
 async def navigate_news(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    allowed, current_count, total_limit = await check_limit(user_id, "view_news")
-    if not allowed:
-        await callback.message.edit_text(
-            f"⚠️ У вас закончились лимиты на просмотр новостей ({current_count}/{total_limit})!\n"
-            "Хотите купить дополнительные просмотры? 💎",
-            reply_markup=get_purchase_keyboard("view_news")
-        )
-        await callback.answer()
-        logger.info(f"User {user_id} reached view limit: {current_count}/{total_limit}")
-        return
+    role = await get_user_role(user_id)
+    if role != "admin":  # Пропускаем проверку лимитов для админов
+        allowed, current_count, total_limit = await check_limit(user_id, "view_news")
+        if not allowed:
+            await callback.message.edit_text(
+                f"⚠️ У вас закончились лимиты на просмотр новостей ({current_count}/{total_limit})!\n"
+                "Хотите купить дополнительные просмотры? 💎",
+                reply_markup=get_purchase_keyboard("view_news")
+            )
+            await callback.answer()
+            logger.info(f"User {user_id} reached view limit: {current_count}/{total_limit}")
+            return
+        await increment_limit(user_id, "view_news")
 
-    await increment_limit(user_id, "view_news")
     data = await state.get_data()
     news = data.get("news", [])
     current_index = data.get("current_index", 0)
@@ -299,12 +305,17 @@ async def show_profile(callback: CallbackQuery):
 
     response = f"👤 Личный кабинет\n\n"
     response += f"🧑 Роль: {stats['role'].capitalize()}\n"
-    response += f"📖 Лимит просмотров: {stats['view_count']}/{stats['view_limit']}\n"
+    if stats['role'] != "admin":  # Для админов лимиты не показываем
+        response += f"📖 Лимит просмотров: {stats['view_count']}/{stats['view_limit']}\n"
+        remaining_views = stats['view_limit'] - stats['view_count']
+        response += f"👀 Посмотреть новостей можно: {remaining_views if remaining_views >= 0 else 0}\n"
     response += f"👍 Поставлено лайков: {stats['likes']}\n"
     response += f"👎 Поставлено дизлайков: {stats['dislikes']}\n"
 
     if stats["role"] == "writer":
         response += f"📝 Лимит постов: {stats['create_count']}/{stats['create_limit']}\n"
+        remaining_posts = stats['create_limit'] - stats['create_count']
+        response += f"📝 Создать новостей можно: {remaining_posts if remaining_posts >= 0 else 0}\n"
         response += f"\n✍️ Ваши новости:\n"
         response += f"- Опубликованные: {stats['published_news']}\n"
         response += f"- На проверке: {stats['pending_news']}\n"
@@ -448,11 +459,39 @@ async def check_payment_status(callback: CallbackQuery, state: FSMContext):
         await add_limit(user_id, action_type, quantity)
         await add_purchase(user_id, action_type, quantity, cost)
 
+        # Обновляем статистику после покупки
+        stats = await get_user_stats(user_id)
+        response = f"🎉 Оплата прошла успешно!\n"
+        response += f"Вы приобрели {quantity} {action_text} за {cost}₽.\n\n"
+        response += f"👤 Личный кабинет\n\n"
+        response += f"🧑 Роль: {stats['role'].capitalize()}\n"
+        if stats['role'] != "admin":  # Для админов лимиты не показываем
+            response += f"📖 Лимит просмотров: {stats['view_count']}/{stats['view_limit']}\n"
+            remaining_views = stats['view_limit'] - stats['view_count']
+            response += f"👀 Посмотреть новостей можно: {remaining_views if remaining_views >= 0 else 0}\n"
+        response += f"👍 Поставлено лайков: {stats['likes']}\n"
+        response += f"👎 Поставлено дизлайков: {stats['dislikes']}\n"
+
+        if stats["role"] == "writer":
+            response += f"📝 Лимит постов: {stats['create_count']}/{stats['create_limit']}\n"
+            remaining_posts = stats['create_limit'] - stats['create_count']
+            response += f"📝 Создать новостей можно: {remaining_posts if remaining_posts >= 0 else 0}\n"
+            response += f"\n✍️ Ваши новости:\n"
+            response += f"- Опубликованные: {stats['published_news']}\n"
+            response += f"- На проверке: {stats['pending_news']}\n"
+            response += f"- Средний рейтинг: {stats['average_rating']:.2f}\n"
+
+        response += "\n🛒 История покупок (последние 5):\n"
+        if stats["purchases"]:
+            for purchase in stats["purchases"]:
+                action = "просмотров" if purchase["action_type"] == "view_news" else "постов"
+                response += f"- {purchase['amount']} {action} за {purchase['cost']}₽ ({purchase['purchase_date']})\n"
+        else:
+            response += "Покупок пока нет.\n"
+
         await callback.message.edit_text(
-            f"🎉 Оплата прошла успешно!\n"
-            f"Вы приобрели {quantity} {action_text} за {cost}₽.\n"
-            "Теперь вы можете продолжить! 👇",
-            reply_markup=get_menu_keyboard(await get_user_role(user_id))
+            response,
+            reply_markup=get_profile_keyboard(stats["role"])
         )
         await state.clear()
         await callback.answer()
