@@ -275,28 +275,17 @@ async def select_source_category(callback: CallbackQuery, state: FSMContext):
     logger.info(f"User {callback.from_user.id} viewed sources in category {category}.")
 
 @router.callback_query(lambda c: c.data.startswith("source_"), SourceFiltering.filtering)
-async def toggle_source(callback: CallbackQuery, state: FSMContext):
+async def view_source(callback: CallbackQuery, state: FSMContext):
     data = callback.data.split("_")
     source_id = int(data[1])
     category = data[2]
     sources = await get_sources(category=category)
-    for source in sources:
-        if source["source_id"] == source_id:
-            source["is_active"] = 1 if source["is_active"] == 0 else 0
-            async with aiosqlite.connect("news_bot.db") as db:
-                await db.execute(
-                    "UPDATE sources SET is_active = ? WHERE source_id = ?",
-                    (source["is_active"], source_id)
-                )
-                await db.commit()
-            break
-
     await callback.message.edit_text(
         f"📡 Источники в категории {category.capitalize()}:",
         reply_markup=get_sources_keyboard(sources, category)
     )
-    await callback.answer("✅ Статус источника изменён!")
-    logger.info(f"User {callback.from_user.id} toggled source ID {source_id} in category {category}.")
+    await callback.answer("ℹ️ Это источник новостей.")
+    logger.info(f"User {callback.from_user.id} viewed source ID {source_id} in category {category}.")
 
 @router.callback_query(lambda c: c.data == "profile")
 async def show_profile(callback: CallbackQuery):
@@ -380,14 +369,33 @@ async def unsubscribe_category(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data.startswith("buy_limits_"))
 async def buy_limits(callback: CallbackQuery):
-    action_type = callback.data.split("_")[2]
-    action_text = "просмотров" if action_type == "view_news" else "постов"
-    await callback.message.edit_text(
-        f"💎 Покупка дополнительных {action_text}\nВыберите количество:",
-        reply_markup=get_quantity_keyboard(action_type)
-    )
+    user_id = callback.from_user.id
+    action = callback.data
+
+    if action == "buy_limits_view":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="5 просмотров за 10P", callback_data="buy_views_5_10")],
+            [InlineKeyboardButton(text="10 просмотров за 15P", callback_data="buy_views_10_15")],
+            [InlineKeyboardButton(text="20 просмотров за 25P", callback_data="buy_views_20_25")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
+        ])
+        await callback.message.edit_text(
+            "💎 Выберите количество просмотров для покупки:",
+            reply_markup=kb
+        )
+    elif action == "buy_limits_create_news":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="5 постов за 10P", callback_data="buy_posts_5_10")],
+            [InlineKeyboardButton(text="10 постов за 15P", callback_data="buy_posts_10_15")],
+            [InlineKeyboardButton(text="20 постов за 25P", callback_data="buy_posts_20_25")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
+        ])
+        await callback.message.edit_text(
+            "💎 Выберите количество постов для покупки:",
+            reply_markup=kb
+        )
     await callback.answer()
-    logger.info(f"User {callback.from_user.id} started buying limits for {action_type}.")
+    logger.info(f"User {user_id} opened buy limits menu: {action}")
 
 @router.callback_query(lambda c: c.data.startswith("purchase_"))
 async def process_purchase(callback: CallbackQuery, state: FSMContext):
@@ -398,7 +406,6 @@ async def process_purchase(callback: CallbackQuery, state: FSMContext):
     cost = int(data[3])
     action_text = "просмотров" if action_type == "view_news" else "постов"
 
-    # Создаём платеж через ЮKassa
     description = f"Покупка {quantity} {action_text} в боте"
     payment = await create_payment(user_id, cost, description, action_type, quantity)
     if not payment:
@@ -413,7 +420,6 @@ async def process_purchase(callback: CallbackQuery, state: FSMContext):
     payment_id = payment["id"]
     confirmation_url = payment["confirmation"]["confirmation_url"]
 
-    # Сохраняем данные о платеже в состоянии
     await state.update_data(payment_id=payment_id, action_type=action_type, quantity=quantity, cost=cost)
 
     await callback.message.edit_text(
@@ -455,11 +461,9 @@ async def check_payment_status(callback: CallbackQuery, state: FSMContext):
         cost = data["cost"]
         action_text = "просмотров" if action_type == "view_news" else "постов"
 
-        # Добавляем лимиты и запись о покупке
         await add_limit(user_id, action_type, quantity)
         await add_purchase(user_id, action_type, quantity, cost)
 
-        # Обновляем статистику после покупки
         stats = await get_user_stats(user_id)
         response = f"🎉 Оплата прошла успешно!\n"
         response += f"Вы приобрели {quantity} {action_text} за {cost}₽.\n\n"

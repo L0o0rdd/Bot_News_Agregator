@@ -2,10 +2,11 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from keyboards.inline import get_writer_panel, get_writer_news_keyboard
+from keyboards.inline import get_writer_news_keyboard
 from utils.database import get_user_role, insert_pending_news, get_writer_news, update_pending_news, delete_pending_news
 from utils.logger import logger
 from utils.database import check_limit, increment_limit
+from aiogram.exceptions import TelegramBadRequest
 
 router = Router()
 
@@ -20,13 +21,37 @@ class NewsEditing(StatesGroup):
 
 @router.callback_query(lambda c: c.data == "writer_panel")
 async def writer_panel(callback: CallbackQuery):
-    published, pending = await get_writer_news(callback.from_user.id)
-    await callback.message.edit_text(
-        "✍️ Панель писателя\nВыбери действие ниже 👇",
-        reply_markup=get_writer_news_keyboard(published, pending)
-    )
+    user_id = callback.from_user.id
+    role = await get_user_role(user_id)
+    if role != "writer":
+        await callback.answer("🚫 Доступ запрещён!", show_alert=True)
+        return
+
+    published, pending = await get_writer_news(user_id)
+    if not published and not pending:
+        new_text = "✍️ Панель писателя\nУ вас пока нет новостей 📭\nВыбери действие ниже 👇"
+    else:
+        new_text = "✍️ Панель писателя\nВыбери действие ниже 👇"
+
+    new_keyboard = get_writer_news_keyboard(published, pending)
+
+    try:
+        await callback.message.edit_text(
+            new_text,
+            reply_markup=new_keyboard
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await callback.answer("ℹ️ Панель уже открыта.")
+        else:
+            logger.error(f"Error in writer_panel for user {user_id}: {str(e)}")
+            raise
+    except Exception as e:
+        logger.error(f"Error in writer_panel for user {user_id}: {str(e)}")
+        raise
+
     await callback.answer()
-    logger.info(f"User {callback.from_user.id} opened writer panel.")
+    logger.info(f"User {user_id} opened writer panel.")
 
 @router.callback_query(lambda c: c.data == "create_news")
 async def create_news(callback: CallbackQuery, state: FSMContext):
@@ -47,19 +72,24 @@ async def create_news(callback: CallbackQuery, state: FSMContext):
             logger.info(f"User {user_id} reached create limit: {current_count}/{total_limit}")
             return
 
+    await state.clear()
     await callback.message.edit_text(
         "🖌 Создание новости\nВведите заголовок новости:"
     )
     await state.set_state(NewsCreation.title)
+    current_state = await state.get_state()
+    logger.info(f"User {callback.from_user.id} started creating news. Set state: {current_state}")
     await callback.answer()
-    logger.info(f"User {callback.from_user.id} started creating news.")
 
-@router.message(NewsCreation.title)
+@router.message(NewsCreation.title, F.text)
 async def process_title(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    logger.info(f"Processing title for user {message.from_user.id}. Current state: {current_state}")
     await state.update_data(title=message.text)
     await message.answer("Введите описание новости:")
     await state.set_state(NewsCreation.description)
-    logger.info(f"User {message.from_user.id} set news title: {message.text}")
+    new_state = await state.get_state()
+    logger.info(f"User {message.from_user.id} set news title: {message.text}. New state: {new_state}")
 
 @router.message(NewsCreation.description)
 async def process_description(message: Message, state: FSMContext):
