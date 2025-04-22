@@ -2,10 +2,10 @@ import asyncio
 from aiogram import Dispatcher, Bot
 from aiogram.fsm.storage.memory import MemoryStorage
 from config.config import BOT_TOKEN, ADMIN_ID
-from handlers import user, admin, manager, writer
+from handlers import user, admin, writer  # Убрали manager
 from utils.database import init_db
 from utils.logger import logger
-from utils.news import start_news_fetching  # Импортируем start_news_fetching
+from utils.news import start_news_fetching
 
 async def main():
     bot = Bot(token=BOT_TOKEN)
@@ -14,8 +14,7 @@ async def main():
 
     dp.include_router(user.router)
     dp.include_router(admin.router)
-    dp.include_router(manager.router)
-    dp.include_router(writer.router)
+    dp.include_router(writer.router)  # Убрали manager.router
 
     await init_db()
     logger.info("Database initialized successfully.")
